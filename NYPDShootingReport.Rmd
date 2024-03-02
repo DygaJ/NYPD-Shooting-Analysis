@@ -1,0 +1,168 @@
+---
+title: "NYPD project"
+author: "D. Garcia"
+date: "2024-02-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+What is the relationship between a statistical murder flag and the city or environment that one resides within? This is a question that this analysis will seek to explore.
+
+The following data is a list of every shooting incident that occurred in NYC going back to 2006. Various characteristics such as perpetrator and victim race, gender, and age are included along with descriptions of the locations in which the events occurred.
+
+```{r url}
+url_import <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+
+```
+
+```{r data_import}
+nypd_data <- read_csv(url_import)
+
+
+```
+```{r tidying data}
+# Use lubridate to convert 'OCCUR_DATE' to Date format
+nypd_data <- nypd_data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE),
+         Year = year(OCCUR_DATE),# mdy() function is used because the original format is month-day-year
+         LOC_OF_OCCUR_DESC = replace_na(LOC_OF_OCCUR_DESC, "Unknown"), # Fill missing values with 'Unknown'
+         # Convert columns to factors directly within mutate for efficiency
+         BORO = as.factor(BORO),
+         VIC_SEX = as.factor(VIC_SEX),
+         VIC_RACE = as.factor(VIC_RACE),
+         PERP_SEX = as.factor(PERP_SEX),
+         LOCATION_DESC = as.factor(LOCATION_DESC),
+         PERP_RACE = as.factor(PERP_RACE)) %>%
+  select(-Lon_Lat,-X_COORD_CD,-Y_COORD_CD,-Latitude,-Longitude, -INCIDENT_KEY,-PRECINCT,-JURISDICTION_CODE) # Remove irrelevant columns
+
+summary(nypd_data)
+```
+```{r visualizations}
+# Summarize data to count the number of incidents by BORO and STATISTICAL_MURDER_FLAG
+incident_counts <- nypd_data %>%
+  group_by(BORO, STATISTICAL_MURDER_FLAG) %>%
+  summarise(IncidentCount = n(), .groups = 'drop')
+# Plot the bar graph
+ggplot(incident_counts, aes(x = BORO, y = IncidentCount, fill = as.factor(STATISTICAL_MURDER_FLAG))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "NYPD Shooting Incidents by Borough and Statistical Murder",
+       x = "Borough",
+       y = "Number of Incidents",
+       fill = "Statistical Murder") +
+  theme_minimal() +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"),
+                    labels = c("TRUE" = "Statistical Murder", "FALSE" = "Not Statistical Murder")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+
+Unsurprisingly, the Boroughs with the highest number of incidents also tend to have the highest number of statistical murder flags. Brooklyn in absolute numbers, appears to have the most statistical murder flags with Staten Island having the least of both, most likely due to it's small population.
+
+```{r Safest borough}
+# Calculate the proportion of statistical murders in each borough
+borough_proportions <- nypd_data %>%
+  group_by(BORO) %>%
+  summarise(TotalCases = n(),
+            MurderCases = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+            Proportion = MurderCases / TotalCases) %>%
+  ungroup()  # Remove grouping
+ggplot(borough_proportions, aes(x = BORO, y = Proportion, fill = BORO)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Cases Classified as Statistical Murders in Each Borough",
+       x = "Borough",
+       y = "Proportion of Statistical Murders") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Hide legend if unnecessary
+
+annual_proportions <- nypd_data %>%
+  group_by(BORO, Year) %>%
+  summarise(TotalCases = n(),
+            MurderCases = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+            Proportion = MurderCases/TotalCases) %>%
+  ungroup()
+
+ggplot(annual_proportions, aes(x = Year, y = Proportion, group = BORO, color = BORO))+
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Annual Proportion of Cases Classified as Statistical Murders by Borough", 
+       x = "Year",
+       y = "Proportion of Statistical Murders (%)",
+       color = "Borough")+
+  theme_minimal()+
+  theme(legend.position = "bottom")
+
+```
+The initial bar graph appears to show that Manhattan has the lowest proportion of cases classified as statistical murders. However, this data is aggregated, hence it could potentially misled people into believing that this represents the current state of each Borough. For this reason I visualized these proportions over time, which shows us that as of the most recent data published by the NYPD, Staten Island has the lowest proportion of cases classified as statistical murders. Something of note is that Staten Island appears to be more volatile relative to other boroughs. I do not know the reason behind this, but believed it to be worth highlighting.
+```{r}
+brooklyn_data <- nypd_data %>%
+  filter(BORO == "BROOKLYN")
+
+location_freq <- brooklyn_data %>%
+  filter(!is.na(LOCATION_DESC), LOCATION_DESC != "(null)") %>%
+  count(LOCATION_DESC, sort = TRUE) %>%
+  top_n(5, wt = n)  # Select the top 5 based on the count 'n'
+
+
+
+print(location_freq)
+# Extract just the names of the top 5 locations
+top_locations <- location_freq$LOCATION_DESC
+
+filtered_data <- brooklyn_data %>%
+  filter(LOCATION_DESC %in% top_locations)
+
+#apply the model
+murder_logit_model_filtered <- glm(STATISTICAL_MURDER_FLAG ~ LOCATION_DESC, 
+                                   data = filtered_data, 
+                                   family = binomial)
+
+summary(murder_logit_model_filtered)
+
+```
+
+
+```{r a closer look}
+# Extract odds ratios and confidence intervals
+odds_ratios <- exp(coef(murder_logit_model_filtered))
+conf_int <- exp(confint(murder_logit_model_filtered))
+
+# Create a data frame for visualization
+odds_ratio_df <- data.frame(OddsRatio = odds_ratios,
+                            LowerCI = conf_int[,1],
+                            UpperCI = conf_int[,2],
+                            Location = names(odds_ratios))
+
+# Plot
+odds_ratio_df <- odds_ratio_df %>%
+  mutate(Location = str_replace(Location, "LOCATION_DESC", ""))
+
+ggplot(odds_ratio_df[-1, ], aes(x = reorder(Location, OddsRatio), y = OddsRatio)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = LowerCI, ymax = UpperCI, color = Location), width = 0.2) +
+  coord_trans(y = "log") +
+  labs(title = "Odds Ratios of Statistical Murder Flag by Top 4 Locations",
+       x = "Location Description",
+       y = "Odds Ratio (Log Scale)",
+       color = "Location Description") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank()) 
+
+
+```
+
+According to the model, there appears to be a strong positive association with private houses and the likelihood of attempted murder. This association decreases as the environment becomes more public, despite the absolute numbers being higher. 
+
+Concluding this report, it appears that there is very little association with being in a more public environment and the likelihood of being shot at with an intent to kill. Further investigation is needed to substantiate this claim, however from the brief analysis done, that is the conclusion that I have arrived at. This data however is not without bias, with a myriad of potential biases that could have skewed results. The most prominent ones that exist being reporting bias, selection bias and measurement bias. Incidents may have been under or over reported in certain areas due to potential differences in the perception of law enforcement. Additionally, Law enforcement may have chosen to record only certain incidents based on existing personal biases. These personal biases could have come up during the categorization of these cases, a decision which could sway whether an indecent is classified as a statistical murder flag or not. A caveat that I also feel is necessary to address in these concluding remarks, is that when analyzing the data I chose to remove all NA's from the calculations, of which there were many, an action that definitely skewed the results.
